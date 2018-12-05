@@ -11,7 +11,7 @@ def cache_key_generator(baseurl, params_dict, private_keys=["key"]):
     params_pairs = []
     for key in alphabetized_keys:
         if key not in private_keys:
-            res.append("{}-{}".format(key, params_dict[key]))
+            params_pairs.append("{}-{}".format(key, params_dict[key]))
     return baseurl + "_".join(params_pairs)
 
 
@@ -32,24 +32,48 @@ def get_job_postings(jobs_batch_num):
 
     # get the job posting data from the web if the data is not on hand
     # and cache the data afterward
-    if not job_postings_web:
+    if not job_postings_html:
         job_postings_html = requests.get(indeed_baseurl, params = params_dict).text
-        cache.set(url, result, 15)
+        cache.set(cache_key, job_postings_html, 15)
 
     # return the job postings data formatted as a BeautifulSoup object
     return BeautifulSoup(job_postings_html, 'html.parser')
 
 
+def process_job_postings(raw_data):
+    # find all job postings on the page
+    job_postings = raw_data.find_all("div", class_ = "jobsearch-SerpJobCard")
+
+    # find the detailed information for each job posting
+    for job_posting in job_postings:
+        # try:
+        name = job_posting.find("a", attrs = {'data-tn-element': "jobTitle"}).text
+        company_name = job_posting.find("span", class_ = "company").text.strip()
+        location = job_posting.find(class_ = "location").text
+        location_split = location.split(",")
+        if len(location_split) > 1:
+            city = location.split(",")[0]
+            state = location.split(",")[1][1:3]
+        url = job_posting.find("a", attrs = {'data-tn-element': "jobTitle"})['href']
+        print(url)
+        print("-" * 80)
+        # except:
+        #     pass
+    return None
+
 def indeed_scraping():
     jobs_batch_num = 0
     #while True: # 这个条件记得改
         # scrape这一页
-        raw_data = get_job_postings(num_jobs)
+    raw_data = get_job_postings(jobs_batch_num)
+    process_job_postings(raw_data)
         # process data
 
         #jobs_batch_num += 10 # update the number for a new batch of job postings
 
 indeed_scraping()
+
+# 在网上获取数据的debug部分
 # def requestURL(baseurl, params = {}):
 #     # This function accepts a URL path and a params diction as inputs.
 #     # It calls requests.get() with those inputs,
