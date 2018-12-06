@@ -1,8 +1,21 @@
 from bs4 import BeautifulSoup
 from caching import Cache
+from geonames_api_username import username
 import requests
+import csv
+import json
 
 indeed_baseurl = "https://www.indeed.com/jobs?"
+geonames_baseurl = "http://api.geonames.org/postalCodeSearchJSON?"
+skillset = {}
+
+# load the skills from the csv file into a blank dictionary
+def load_skills():
+    with open("skills.csv", encoding='utf-8-sig') as skills_csv:
+        skills = list(csv.reader(skills_csv, delimiter = ","))
+    for skill in skills:
+        skillset[skill[0]] = 0
+
 
 # Use the passed base url, parameters dictionary, and private keys list to generate
 # and return a String that can be used as the unique key for the JSON format caching file
@@ -40,25 +53,77 @@ def get_job_postings(jobs_batch_num):
     return BeautifulSoup(job_postings_html, 'html.parser')
 
 
+# Get the HTML format single posting detail either from the caching file or the web
+# given the passed url and return the detail of that posting formatted
+# as a BeautifulSoup object
+def get_single_posting(url):
+    cache = Cache("detail_pages.json")
+    posting = cache.get(url)
+
+    if not posting:
+        posting = requests.get(url).text
+        cache.set(url, posting, 15)
+
+    return BeautifulSoup(posting, 'html.parser')
+
+
+# Get the JSON format geolocation infomation either from the caching file or the
+# GeoNames API given the passed city name and return the latitude and longitude
+# of that city in a tuple
+def get_geo_data(city):
+    params_dict = {"placename": city, "username": username, "country": "us", "maxRows": 1}
+
+    cache_key = cache_key_generator(geonames_baseurl, params_dict)
+    cache = Cache("geo_info.json")
+    geo_info = cache.get(cache_key)
+
+    if not geo_info:
+        geo_info = json.loads(requests.get(geonames_baseurl, params = params_dict).text)
+        cache.set(cache_key, geo_info, 100)
+
+    try:
+        lat = geo_info['postalCodes'][0]['lat']
+        lng = geo_info['postalCodes'][0]['lng']
+    except:
+        lat = lng = None
+
+    return lat, lng
+
+
 def process_job_postings(raw_data):
     # find all job postings on the page
     job_postings = raw_data.find_all("div", class_ = "jobsearch-SerpJobCard")
 
+    csvref = open("jobs.csv", "w")
+    csvref.write("job_name,company_name,city,state,latitude,longitude,url,skills_required\n")
     # find the detailed information for each job posting
     for job_posting in job_postings:
         # try:
         name = job_posting.find("a", attrs = {'data-tn-element': "jobTitle"}).text
-        company_name = job_posting.find("span", class_ = "company").text.strip()
-        location = job_posting.find(class_ = "location").text
-        location_split = location.split(",")
-        if len(location_split) > 1:
-            city = location.split(",")[0]
-            state = location.split(",")[1][1:3]
-        url = job_posting.find("a", attrs = {'data-tn-element': "jobTitle"})['href']
-        print(url)
-        print("-" * 80)
+        # exclude the job postings related to software engineering
+        if "software engineer" not in name.lower():
+            company_name = job_posting.find("span", class_ = "company").text.strip()
+            location = job_posting.find(class_ = "location").text
+            location_split = location.split(",")
+            if len(location_split) > 1:
+                city = location.split(",")[0]
+                state = location.split(",")[1][1:3]
+                lat, lng = get_geo_data(city)
+            else:
+                city = state = lat = lng = None
+            url = "https://www.indeed.com" + job_posting.find("a", attrs = {'data-tn-element': "jobTitle"})['href']
+            posting = get_single_posting(url).find("div", class_ = "jobsearch-JobComponent-description").text
+            skills_for_single_posting = []
+            for skill in skillset:
+                if skill in posting:
+                    skillset[skill] += 1
+                    skills_for_single_posting.append(skill)
+
+        csvref.write('"{}","{}","{}","{}","{}","{}","{}","{}"\n'.format(name, company_name, city, state, lat, lng, url, skills_for_single_posting))
         # except:
         #     pass
+    csvref.close()
+    print(skillset)
     return None
 
 def indeed_scraping():
@@ -70,8 +135,9 @@ def indeed_scraping():
         # process data
 
         #jobs_batch_num += 10 # update the number for a new batch of job postings
-
+load_skills()
 indeed_scraping()
+
 
 # 在网上获取数据的debug部分
 # def requestURL(baseurl, params = {}):
