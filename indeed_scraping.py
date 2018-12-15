@@ -1,13 +1,106 @@
 from bs4 import BeautifulSoup
-from caching import Cache
 from geonames_api_username import username
+from datetime import datetime
 import requests
 import csv
 import json
+import psycopg2
+import psycopg2.extras
+import re
+
+
+DATETIME_FORMAT = "%Y-%m-%d %H:%M:%S.%f"
+DEBUG = True
+
+class Cache:
+    def __init__(self, filename):
+        """Load cache from disk, if present"""
+        self.filename = filename
+        try:
+            with open(self.filename, 'r') as cache_file:
+                cache_json = cache_file.read()
+                self.cache_diction = json.loads(cache_json)
+        except:
+            self.cache_diction = {}
+
+    def _save_to_disk(self):
+        """Save cache to disk"""
+        with open(self.filename, 'w') as cache_file:
+            json.dump(self.cache_diction, cache_file, indent = 4)
+
+    def _has_entry_expired(self, timestamp_str, expire_in_days):
+        """Check if cache timestamp is over expire_in_days old"""
+
+        # gives current datetime
+        now = datetime.now()
+
+        # datetime.strptime converts a formatted string into datetime object
+        cache_timestamp = datetime.strptime(timestamp_str, DATETIME_FORMAT)
+
+        # subtracting two datetime objects gives you a timedelta object
+        delta = now - cache_timestamp
+        delta_in_days = delta.days
+
+
+        # now that we have days as integers, we can just use comparison
+        # and decide if cache has expired or not
+        if delta_in_days > expire_in_days:
+            return True # It's been longer than expiry time
+        else:
+            return False
+
+    def get(self, identifier):
+        """If unique identifier exists in the cache and has not expired, return the data associated with it from the request, else return None"""
+        identifier = identifier.upper() # Assuming none will differ with case sensitivity here
+        if identifier in self.cache_diction:
+            data_assoc_dict = self.cache_diction[identifier]
+            if self._has_entry_expired(data_assoc_dict['timestamp'],data_assoc_dict['expire_in_days']):
+                if DEBUG:
+                    print("Cache has expired for {}".format(identifier))
+                # also remove old copy from cache
+                del self.cache_diction[identifier]
+                self._save_to_disk()
+                data = None
+            else:
+                data = data_assoc_dict['values']
+        else:
+            data = None
+        return data
+
+    def set(self, identifier, data, expire_in_days):
+        """Add identifier and its associated values (literal data) to the cache, and save the cache as json"""
+        identifier = identifier.upper() # make unique
+        self.cache_diction[identifier] = {
+            'values': data,
+            'timestamp': datetime.now().strftime(DATETIME_FORMAT),
+            'expire_in_days': expire_in_days
+        }
+
+        self._save_to_disk()
+
 
 indeed_baseurl = "https://www.indeed.com/jobs?"
 geonames_baseurl = "http://api.geonames.org/postalCodeSearchJSON?"
-skillset = {}
+skillset = {} # a dictionary that stores all the skills and the number of times they appear
+job_names = [] # a list that stores all the nonrepetitive job titles
+job_classes = [] # a list that stores all the nonrepetitive job classes
+
+
+class Job():
+    def __init__(self, title, company, skills, url, city=None, state=None):
+        self.title = title
+        self.company = company
+        self.skills = skills
+        self.url = url
+        self.city = city
+        self.state = state
+
+        self.lat = None
+        self.lng = None
+
+    def __str__(self):
+        return "{} ({}): {}, {}".format(self.title, self.company, self.city, self.state)
+
 
 # load the skills from the csv file into a blank dictionary
 def load_skills():
@@ -32,6 +125,7 @@ def cache_key_generator(baseurl, params_dict, private_keys=["key"]):
 # given the passed jobs batch number and return the job postings data formatted
 # as a BeautifulSoup object
 def get_job_postings(jobs_batch_num):
+    print("Processing the {}/1000th batch of jobs".format(jobs_batch_num + 10))
     # generate the parameters dictionary that can be used to get the HTML format
     # job postings either from the caching file or the web
     params_dict = {"q": "data intern", "l": "United States"}
@@ -90,63 +184,89 @@ def get_geo_data(city):
     return lat, lng
 
 
+# Process the data on the single job postings webpage and store the data
+# in the Job class
 def process_job_postings(raw_data):
     # find all job postings on the page
     job_postings = raw_data.find_all("div", class_ = "jobsearch-SerpJobCard")
 
-    csvref = open("jobs.csv", "w")
-    csvref.write("job_name,company_name,city,state,latitude,longitude,url,skills_required\n")
     # find the detailed information for each job posting
     for job_posting in job_postings:
-        # try:
-        name = job_posting.find("a", attrs = {'data-tn-element': "jobTitle"}).text
-        # exclude the job postings related to software engineering
-        if "software engineer" not in name.lower():
-            company_name = job_posting.find("span", class_ = "company").text.strip()
-            location = job_posting.find(class_ = "location").text
-            location_split = location.split(",")
-            if len(location_split) > 1:
-                city = location.split(",")[0]
-                state = location.split(",")[1][1:3]
-                lat, lng = get_geo_data(city)
-            else:
-                city = state = lat = lng = None
-            url = "https://www.indeed.com" + job_posting.find("a", attrs = {'data-tn-element': "jobTitle"})['href']
-            posting = get_single_posting(url).find("div", class_ = "jobsearch-JobComponent-description").text
-            skills_for_single_posting = []
-            for skill in skillset:
-                if skill in posting:
-                    skillset[skill] += 1
-                    skills_for_single_posting.append(skill)
+        try:
+            name = job_posting.find("a", attrs = {'data-tn-element': "jobTitle"}).text
+            if name not in job_names:
+                job_names.append(name)
 
-        csvref.write('"{}","{}","{}","{}","{}","{}","{}","{}"\n'.format(name, company_name, city, state, lat, lng, url, skills_for_single_posting))
-        # except:
-        #     pass
-    csvref.close()
-    print(skillset)
-    return None
+                # exclude the job postings related to software engineering
+                if "software engineer" not in name.lower():
+                    print("!!!!!!!" + name)
+                    company_name = job_posting.find("span", class_ = "company").text.strip()
+                    location = job_posting.find(class_ = "location").text
+                    location_split = location.split(",")
+                    if len(location_split) > 1:
+                        city = location.split(",")[0]
+                        state = location.split(",")[1][1:3]
 
-def indeed_scraping():
+                    else:
+                        city = state = None
+                    url = "https://www.indeed.com" + job_posting.find("a", attrs = {'data-tn-element': "jobTitle"})['href']
+                    posting = get_single_posting(url).find("div", class_ = "jobsearch-JobComponent-description").text.lower()
+
+                    skills_for_single_posting = []
+                    for skill in skillset:
+                        if skill == 'r' or skill == 'aws':
+                            if re.search("([\.\,\s]|^)" + skill + "($|[\.\,\s])", posting):
+                                skillset[skill] += 1
+                                skills_for_single_posting.append(skill)
+                        else:
+                            if skill in posting:
+                                skillset[skill] += 1
+                                skills_for_single_posting.append(skill)
+                    if len(skills_for_single_posting) > 0:
+                        job = Job(name, company_name, skills_for_single_posting, url, city, state)
+                        job_classes.append(job)
+                        print(str(job))
+
+        except:
+            pass
+
+    print("-" * 100)
+
+# Scrape all the data intern job postings in the United States from Indeed.com,
+# process the data, and store the data into the database
+def indeed_scrape_and_store():
     jobs_batch_num = 0
-    #while True: # 这个条件记得改
-        # scrape这一页
-    raw_data = get_job_postings(jobs_batch_num)
-    process_job_postings(raw_data)
-        # process data
-
-        #jobs_batch_num += 10 # update the number for a new batch of job postings
-load_skills()
-indeed_scraping()
+    while jobs_batch_num <= 990: # that's the end of all pages
+        # scrape the single page
+        raw_data = get_job_postings(jobs_batch_num)
+        # process data on the webpage and add it to the database
+        process_job_postings(raw_data)
+        # update the number for a new batch of job postings
+        jobs_batch_num += 10
 
 
-# 在网上获取数据的debug部分
-# def requestURL(baseurl, params = {}):
-#     # This function accepts a URL path and a params diction as inputs.
-#     # It calls requests.get() with those inputs,
-#     # and returns the full URL of the data you want to get.
-#     req = requests.Request(method = 'GET', url = baseurl, params = params)
-#     prepped = req.prepare()
-#     return prepped.url
-#
-# print(params)
-# print(requestURL(some_base_url, some_params_dictionary))
+    # try to make the database connection
+    try:
+        conn = psycopg2.connect("dbname='job_postings' user=") # No password on the databases yet -- wouldn't want to save that in plain text, anyway
+        # Remember: need to, at command prompt or in postgres GUI: createdb test507_music (or whatever db name is in line ^)
+        print("Success connecting to database")
+    except:
+        print("Unable to connect to the database. Check server and credentials.")
+        exit() # stop running the program if there is no database connection
+
+    cur = conn.cursor(cursor_factory = psycopg2.extras.DictCursor)
+
+    # create a table called data_jobs in the job_postings database
+    cur.execute("DROP TABLE IF EXISTS data_jobs")
+    cur.execute('''CREATE TABLE IF NOT EXISTS data_jobs(
+    job_title VARCHAR(64) PRIMARY KEY, company_name VARCHAR(64), city VARCHAR(64),
+    state VARCHAR(64), latitude float(18), longitude float(18), url TEXT, skills VARCHAR(1280))''')
+
+    for job in job_classes:
+        if job.city != None:
+            job.lat, job.lng = get_geo_data(job.city)
+        query = """INSERT INTO data_jobs(job_title, company_name, city, state, latitude, longitude, url, skills) VALUES(%s, %s, %s, %s, %s, %s, %s, %s)"""
+        print("insert")
+        cur.execute(query + " ON CONFLICT DO NOTHING",(job.title, job.company, job.city, job.state, job.lat, job.lng, job.url, job.skills,))
+
+    conn.commit()
