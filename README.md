@@ -3,6 +3,12 @@
 # Project Overview
 This project scrapes Indeed.com for all job postings related to data internships, which include information about the job title, company name, salary, region, URL, and skills required for each job posting. The gathered pieces of data will then be stored into a database and also into a dictionary that stores the skill names as keys and their occurrences as values. Finally, the program will generate a map showing all job postings across the U.S. and also a bar chart that visualizes all the data related skills and their occurrences, sorted from high to low.
 
+## Sample Visualization
+### Data Interns Across the U.S.
+![jobs_across_US](jobs_across_US.png?raw=true "Data Interns Across the U.S.")
+### Data Related Skills & Occurrences
+![skills_importance](skills_importance.png?raw=true "Data Related Skills & Occurrences")
+
 
 # Skills and Tools Involved
 1. Webpage scraping (Indeed.com) and processing using BeautifulSoup
